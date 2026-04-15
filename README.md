@@ -2,6 +2,8 @@
 
 An AI coding agent sends HTTP requests using a **dummy token** (`FAKE_TOKEN_12345`).
 
+For a structured developer guide, start with [`docs/README.md`](docs/README.md).
+
 **On Linux:** An eBPF `cgroup_skb/egress` hook intercepts every outbound TCP packet from that agent's cgroup, locates the dummy token in the payload, and overwrites it with the **real credential** before the packet leaves the host.
 
 **On macOS/Windows:** A local HTTP proxy (`localhost:8888`) intercepts requests, rewrites the token in HTTP headers and request bodies, and forwards to the upstream server.
