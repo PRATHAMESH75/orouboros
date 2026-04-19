@@ -8,6 +8,10 @@ For a structured developer guide, start with [`docs/README.md`](docs/README.md).
 
 **On macOS/Windows:** A local HTTP proxy (`localhost:8888`) intercepts requests, rewrites the token in HTTP headers and request bodies, and forwards to the upstream server.
 
+**OuroBoros flow in action***
+<img width="5928" height="8192" alt="eBPF and Proxy Mode Token-2026-04-14-193521" src="https://github.com/user-attachments/assets/a4a90cb7-7698-4cda-af03-d6a2acbd5b7c" />
+
+
 Both modes ensure the agent process — and any logs it emits — **only ever sees the fake token**.
 
 ```

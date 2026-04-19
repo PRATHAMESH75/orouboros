@@ -89,8 +89,7 @@ fn try_intercept(ctx: &TcContext) -> Result<i32, i64> {
     bump_stat(STAT_PACKETS);
     set_debug(DEBUG_LAST_PACKET_LEN, ctx.len() as u64);
 
-    let cgroup_id =
-        unsafe { aya_ebpf::helpers::bpf_skb_cgroup_id(ctx.as_ptr() as *mut _) };
+    let cgroup_id = unsafe { aya_ebpf::helpers::bpf_skb_cgroup_id(ctx.as_ptr() as *mut _) };
     set_debug(DEBUG_LAST_CGROUP_ID, cgroup_id);
     if cgroup_id == 0 {
         bump_stat(STAT_CGROUP_ZERO);

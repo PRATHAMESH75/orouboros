@@ -84,7 +84,11 @@ pub async fn run_ebpf_mode() -> Result<()> {
                 attached_ifaces.push(iface);
             }
             Err(e) => {
-                log::warn!("Skipping {}: failed to attach TC egress program: {}", iface, e);
+                log::warn!(
+                    "Skipping {}: failed to attach TC egress program: {}",
+                    iface,
+                    e
+                );
             }
         }
     }
@@ -120,11 +124,9 @@ pub async fn run_ebpf_mode() -> Result<()> {
 
     let stats: Array<_, u64> = Array::try_from(bpf.map("STATS").context("STATS not found")?)
         .context("Failed to open STATS as Array")?;
-    let debug_values: Array<_, u64> = Array::try_from(
-        bpf.map("DEBUG_VALUES")
-            .context("DEBUG_VALUES not found")?,
-    )
-    .context("Failed to open DEBUG_VALUES as Array")?;
+    let debug_values: Array<_, u64> =
+        Array::try_from(bpf.map("DEBUG_VALUES").context("DEBUG_VALUES not found")?)
+            .context("Failed to open DEBUG_VALUES as Array")?;
 
     // 8. Block until SIGINT / Ctrl-C, logging packet counters while running.
     let mut ticker = time::interval(time::Duration::from_secs(5));
@@ -166,35 +168,34 @@ fn print_banner(cgroup_id: u64, iface: &str) {
 
     println!();
     println!("{cyan}{bold}");
-    println!(r"        ____....----````----....____ ");
-    println!(r"   .--``                            ``--. ");
-    println!(r" /`   .--.        orouboros           .--.`\ ");
-    println!(r"|   /  _  \                          /  _  \ |");
-    println!(r"|  | (@) | |    zero-knowledge       | (@) |  |");
-    println!(r"|   \  ‾  /     credential vault      \  ‾  / |");
-    println!(r" \   `--`    ________________________   `--`  /");
-    println!(r"  `>  _     /           ^            \    _ <`");
-    println!(r"   | / \   /   [FAKE]───►───[REAL]   \  / \ |");
-    println!(r"   |/ ~~\/        eBPF intercepts        \/~~ \|");
-    println!(r"   (  o  )     token before it leaves   (  o  )");
-    println!(r"    \___/ `>___________________________<` \___/");
-    println!(r"           ════════════════════════════       ");
+    println!(r"          ≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋");
+    println!(r"         ≋                                      ≋");
+    println!(r"        ≋    ╔══════════════════════════════╗    ≋");
+    println!(r"        ≋    ║  ⊙  o u r o u b o r o s  ⊙  ║    ≋");
+    println!(r"        ≋    ║    a g e n t - v a u l t    ║    ≋");
+    println!(r"        ≋    ║    zero-knowledge injector   ║    ≋");
+    println!(r"        ≋    ║    [FAKE] ─────────► [REAL]  ║    ≋");
+    println!(r"        ≋    ╚══════════════════════════════╝    ≋");
+    println!(r"         ≋                                      ≋");
+    println!(r"          ≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋");
+    println!(r"   >≋─────────── TAIL · BODY · HEAD ────────────≋◄(@)");
+    println!(r"         ╰──── mouth closes the ring (ouroboros) ─╯");
     println!("{reset}");
 
     println!(
-        "{bold}  a g e n t - v a u l t{reset}  {dim}v{}{reset}",
+        "{bold}  agent-vault{reset}  {dim}v{}  ·  eBPF mode{reset}",
         env!("CARGO_PKG_VERSION")
     );
-    println!("{dim}  Zero-Knowledge eBPF Credential Injector — v2{reset}");
+    println!("{dim}  Zero-Knowledge eBPF Credential Injector{reset}");
     println!();
 
     println!("{green}  ✔{reset}  eBPF TC egress program loaded & attached");
-    println!("{green}  ✔{reset}  interface       {yellow}{bold}{}{reset}", iface);
-    println!("{green}  ✔{reset}  cgroup created  {dim}{CGROUP_PATH}{reset}");
     println!(
-        "{green}  ✔{reset}  cgroup_id       {yellow}{bold}{}{reset}",
-        cgroup_id
+        "{green}  ✔{reset}  interface       {yellow}{bold}{}{reset}",
+        iface
     );
+    println!("{green}  ✔{reset}  cgroup created  {dim}{CGROUP_PATH}{reset}");
+    println!("{green}  ✔{reset}  cgroup_id       {yellow}{bold}{cgroup_id}{reset}");
     println!(
         "{green}  ✔{reset}  dummy token     {dim}FAKE_TOKEN_12345{reset}  →  real token injected in-flight"
     );
@@ -202,7 +203,7 @@ fn print_banner(cgroup_id: u64, iface: &str) {
 
     println!("{bold}  How to test:{reset}");
     println!("  {dim}# 1. Move your shell into the intercepted cgroup:{reset}");
-    println!("  echo $$ | sudo tee {}/cgroup.procs", CGROUP_PATH);
+    println!("  echo $$ | sudo tee {CGROUP_PATH}/cgroup.procs");
     println!();
     println!("  {dim}# 2. Send a request with the dummy token:{reset}");
     println!("  curl -s -H \"Authorization: Bearer FAKE_TOKEN_12345\" http://httpbin.org/headers");
@@ -267,9 +268,8 @@ fn egress_interfaces() -> Result<Vec<String>> {
         }
     }
 
-    active_non_loopback_interfaces().with_context(|| {
-        format!("Set {IFACE_ENV}=<interface>, for example {IFACE_ENV}=eth0")
-    })
+    active_non_loopback_interfaces()
+        .with_context(|| format!("Set {IFACE_ENV}=<interface>, for example {IFACE_ENV}=eth0"))
 }
 
 fn active_non_loopback_interfaces() -> Result<Vec<String>> {
