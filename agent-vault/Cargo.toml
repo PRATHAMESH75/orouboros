@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow         = "1"
-tokio          = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util"] }
+tokio          = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "time"] }
 log            = "0.4"
 env_logger     = "0.10"
 # HTTP proxy dependencies (for macOS/Windows support)
@@ -27,7 +27,6 @@ agent-vault-common = { path = "../agent-vault-common" }
 [target.'cfg(target_os = "linux")'.dependencies]
 agent-vault-common = { path = "../agent-vault-common", features = ["userspace"] }
 aya            = "0.13.1"
-aya-log        = "0.2.1"
 http           = "0.2"
 futures        = "0.3"
 bytes          = "1"

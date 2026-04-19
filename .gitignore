@@ -25,5 +25,11 @@ agent-vault-ebpf/target/
 .env
 .env.local
 
+# Local runtime/debug artifacts
+.codex
+.codex/
+agent-vault.log
+agent-vault.pid
+
 # OS files
 Thumbs.db

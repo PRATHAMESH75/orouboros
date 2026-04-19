@@ -53,7 +53,7 @@ Path: `agent-vault-ebpf/`
 
 Purpose:
 
-- Builds the kernel-side `cgroup_skb/egress` program.
+- Builds the kernel-side TC egress classifier.
 - Rewrites matching outbound packet payload bytes.
 - Runs as `#![no_std]` and `#![no_main]`.
 
@@ -64,7 +64,8 @@ Important file:
 Important items:
 
 - `TOKEN_MAP`: BPF hash map keyed by cgroup ID.
-- `cgroup_skb_egress`: eBPF program entry point.
+- `STATS` and `DEBUG_VALUES`: BPF array maps used for daemon-side diagnostics.
+- `token_rewrite_egress`: eBPF program entry point.
 - `try_intercept`: packet rewrite implementation.
 
 Build requirements:
@@ -92,8 +93,7 @@ Important files:
 
 Platform-specific dependencies:
 
-- Linux builds enable `agent-vault-common/userspace` and include `aya` and
-  `aya-log`.
+- Linux builds enable `agent-vault-common/userspace` and include `aya`.
 - Non-Linux builds include `agent-vault-common` without Linux eBPF features.
 
 ## `xtask`
@@ -118,4 +118,3 @@ Implementation:
 - `BuildEbpf` runs `rustup run nightly cargo build ... --target bpfel-unknown-none -Z build-std=core`.
 - `Build` runs `cargo build --package agent-vault`.
 - `BuildAll` runs eBPF first, then the daemon.
-

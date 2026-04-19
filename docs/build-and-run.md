@@ -1,16 +1,14 @@
 # Build and Run Guide
 
-## Current Environment Note
+## Verified Commands
 
-This repository expects the Rust toolchain to be available as `cargo`.
-In the current checked environment, `cargo` was not found when attempting:
+The current code has been checked locally with:
 
 ```bash
-cargo metadata --no-deps --format-version 1
-cargo test --workspace --exclude agent-vault-ebpf
+cargo xtask build-ebpf --release
+cargo check --workspace --exclude agent-vault-ebpf
+cargo build --package agent-vault --release
 ```
-
-Install Rust with `rustup` before building locally.
 
 ## Prerequisites
 
@@ -28,6 +26,8 @@ Linux eBPF mode:
 - eBPF-related system libraries: `llvm`, `clang`, `libelf-dev`.
 - Elevated privileges or container capabilities for BPF loading and cgroup
   attachment.
+- Docker daemon access. Use `sudo docker ...` unless your user belongs to the
+  `docker` group.
 
 Proxy mode:
 
@@ -107,15 +107,20 @@ Authorization: Bearer REAL_SECRET_9999
 ## Run eBPF Mode with Docker Compose
 
 ```bash
-docker compose build
-docker compose up
+sudo docker compose build --no-cache --pull
+sudo docker compose up
 ```
 
 In another shell on the Linux host:
 
 ```bash
-echo $$ | sudo tee /sys/fs/cgroup/agent-vault-test/cgroup.procs
-curl -v -H "Authorization: Bearer FAKE_TOKEN_12345" http://httpbin.org/headers
+echo $$ | sudo tee /sys/fs/cgroup/agent-vault-test/cgroup.procs >/dev/null
+cat /proc/$$/cgroup
+
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+  curl -4 -sS --http1.1 --noproxy '*' \
+  -H "Authorization: Bearer FAKE_TOKEN_12345" \
+  http://httpbin.org/headers
 ```
 
 Expected upstream-visible header:
@@ -123,6 +128,21 @@ Expected upstream-visible header:
 ```text
 Authorization: Bearer REAL_SECRET_9999
 ```
+
+The cgroup check should show:
+
+```text
+0::/agent-vault-test
+```
+
+The daemon should also log counters similar to:
+
+```text
+eBPF stats: packets=..., map_hits=..., tcp_payloads=1, token_found=1, rewrite_ok=1; ...
+```
+
+`token_found=1` and `rewrite_ok=1` confirm that the eBPF program performed the
+in-flight rewrite.
 
 ## Docker Details
 
@@ -136,11 +156,18 @@ Authorization: Bearer REAL_SECRET_9999
 
 - `privileged: true`
 - `pid: host`
+- `network_mode: host`
+- build network set to `host`
 - `/sys/fs/cgroup:/sys/fs/cgroup`
 - `RUST_LOG=info`
 
 These settings are required by the current eBPF mode because the daemon must
-create a host-visible cgroup and attach a BPF program to it.
+create a host-visible cgroup and attach a TC BPF program in the same network
+namespace used by the host shell running the test request.
+
+The builder image uses the current stable Rust image (`rust:1-slim-bookworm`) so
+that `cargo install bpf-linker` can build crates using Rust 2024 edition
+metadata.
 
 ## CI
 
@@ -157,4 +184,3 @@ The workflow:
 6. Uploads the eBPF bytecode and daemon binary as artifacts.
 
 For git tags, it also creates a tarball and SHA256 checksum.
-

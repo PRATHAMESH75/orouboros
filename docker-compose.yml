@@ -1,15 +1,18 @@
-version: "3.9"
-
 services:
   agent-vault:
-    build: .
+    build:
+      context: .
+      network: host
     # privileged grants CAP_BPF + CAP_NET_ADMIN required to load/attach eBPF programs.
     # For production, scope down to:
     #   cap_add: [CAP_BPF, CAP_NET_ADMIN, CAP_SYS_ADMIN]
     privileged: true
-    # pid: host is required so that bpf_get_current_cgroup_id() inside the kernel
-    # returns the host-namespace cgroup ID that matches the inode we read in user-space.
+    # pid: host keeps cgroup IDs consistent between the TC egress program and
+    # the host cgroup inode read in user-space.
     pid: host
+    # TC programs attach inside the daemon's network namespace. Use the host
+    # namespace so a host shell moved into the test cgroup is actually covered.
+    network_mode: host
     volumes:
       # Bind-mount the host's cgroup v2 filesystem (read-write) so the daemon can
       # create /sys/fs/cgroup/agent-vault-test and the kernel cgroup ID is consistent.
@@ -17,3 +20,5 @@ services:
     environment:
       # Set RUST_LOG to see structured log output from the daemon.
       RUST_LOG: info
+      # Optional override when default route interface detection is not enough.
+      AGENT_VAULT_IFACE: ${AGENT_VAULT_IFACE:-}

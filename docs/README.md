@@ -9,8 +9,8 @@ dummy token such as `FAKE_TOKEN_12345`; Agent Vault replaces it with
 
 The repository has two interception modes:
 
-- Linux eBPF mode: a kernel `cgroup_skb/egress` program rewrites outbound
-  packet payloads for processes inside a configured cgroup.
+- Linux eBPF mode: a kernel TC egress classifier rewrites outbound TCP packet
+  payloads for processes inside a configured cgroup.
 - Proxy mode: a local user-space HTTP proxy on `127.0.0.1:8888` rewrites
   HTTP/1.1 headers and bodies before forwarding traffic.
 
@@ -34,4 +34,3 @@ The repository has two interception modes:
 - `agent-vault-ebpf/src/main.rs`: kernel-side payload rewrite logic.
 - `agent-vault-common/src/lib.rs`: shared `TokenPair` ABI type.
 - `xtask/src/main.rs`: build automation for the eBPF program and daemon.
-

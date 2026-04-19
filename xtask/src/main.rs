@@ -96,9 +96,7 @@ fn build_daemon(release: bool) -> Result<()> {
     println!("🛠️  Building agent-vault daemon...");
 
     let mut cmd = Command::new("cargo");
-    cmd.arg("build")
-        .arg("--package")
-        .arg("agent-vault");
+    cmd.arg("build").arg("--package").arg("agent-vault");
 
     if release {
         cmd.arg("--release");
