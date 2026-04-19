@@ -28,17 +28,17 @@ Function: `run_ebpf_mode` in `agent-vault/src/ebpf.rs`
 ```text
 start daemon
 load embedded eBPF bytes
-initialize eBPF logger
 create /sys/fs/cgroup/agent-vault-test
-open cgroup directory
-find cgroup_skb_egress program in eBPF object
+discover active non-loopback host interfaces, or read AGENT_VAULT_IFACE
+find token_rewrite_egress program in eBPF object
 load program into kernel
-attach program to cgroup egress
+add clsact qdisc and attach program to TC egress on host interfaces
 read cgroup inode as cgroup ID
 open TOKEN_MAP
 insert TokenPair for cgroup ID
+open STATS and DEBUG_VALUES maps
 print test instructions
-wait for Ctrl-C
+log eBPF counters while waiting for Ctrl-C
 remove cgroup on shutdown
 ```
 
@@ -60,28 +60,35 @@ echo $$ | sudo tee /sys/fs/cgroup/agent-vault-test/cgroup.procs
 Function: `try_intercept` in `agent-vault-ebpf/src/main.rs`
 
 ```text
-packet leaves cgroup
-get current cgroup ID
+packet exits a hooked host interface
+get skb cgroup ID
 look up TokenPair in TOKEN_MAP
 if no map entry, allow packet unchanged
-load payload bytes from fixed offset
-scan for dummy token
+parse Ethernet, IPv4, and TCP headers
+scan up to the first 128 bytes of TCP payload for dummy token
 if no match, allow packet unchanged
 overwrite bytes with real token
-recompute IP/TCP checksums
+ask the kernel to recompute the skb checksum
 allow modified packet
+update STATS and DEBUG_VALUES counters
 ```
 
-The current payload offset is calculated as:
+The payload offset is calculated from packet headers:
 
 ```text
-Ethernet header: 14 bytes
-IPv4 header:     20 bytes
-TCP header:      20 bytes
-payload offset:  54 bytes
+Ethernet header: fixed 14 bytes
+IPv4 header:     derived from IHL
+TCP header:      derived from TCP data offset
 ```
 
-The implementation assumes no IP options and no TCP options.
+The implementation handles IPv4 and TCP header options, but passes non-IPv4 and
+non-TCP traffic through unchanged.
+
+The daemon logs eBPF counters when traffic changes:
+
+```text
+eBPF stats: packets=..., cgroup_zero=..., map_hits=..., tcp_payloads=..., token_found=..., rewrite_ok=...; last_cgroup_id=..., last_packet_len=..., last_payload_offset=..., last_scan_len=...
+```
 
 ## Proxy Startup Flow
 
@@ -112,4 +119,3 @@ copy upstream response to client
 
 Because the proxy connects to port 80, it is suitable for plain HTTP tests. It
 does not implement HTTPS tunneling.
-

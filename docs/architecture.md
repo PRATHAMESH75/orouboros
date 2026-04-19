@@ -20,7 +20,7 @@ space.
     +--------------------+            +--------------------+
     | Linux eBPF mode    |            | HTTP proxy mode    |
     |                    |            |                    |
-    | cgroup egress hook |            | localhost:8888     |
+    | TC egress hook     |            | localhost:8888     |
     | BPF hash map       |            | user-space rewrite |
     +--------------------+            +--------------------+
 ```
@@ -87,23 +87,29 @@ The key is a cgroup ID. The value is the dummy/real token pair.
 At startup, the daemon:
 
 1. Loads the compiled eBPF object.
-2. Initializes eBPF logging with `aya-log`.
-3. Creates `/sys/fs/cgroup/agent-vault-test`.
-4. Opens that cgroup directory.
-5. Loads and attaches the `cgroup_skb_egress` program.
+2. Creates `/sys/fs/cgroup/agent-vault-test`.
+3. Discovers active non-loopback host interfaces, unless `AGENT_VAULT_IFACE`
+   is set.
+4. Loads the `token_rewrite_egress` TC classifier.
+5. Adds `clsact` and attaches the classifier at TC egress.
 6. Reads the cgroup directory inode as the cgroup ID.
 7. Inserts `TokenPair` into `TOKEN_MAP` using that cgroup ID.
-8. Waits for Ctrl-C.
+8. Opens `STATS` and `DEBUG_VALUES` maps for diagnostics.
+9. Logs packet counters while waiting for Ctrl-C.
 
 At packet egress time, the kernel program:
 
-1. Gets the current cgroup ID with `bpf_get_current_cgroup_id()`.
+1. Gets the skb cgroup ID with `bpf_skb_cgroup_id()`.
 2. Looks up that cgroup ID in `TOKEN_MAP`.
-3. Loads up to 128 bytes of payload into a stack buffer.
-4. Searches for the dummy token.
+3. Parses Ethernet, IPv4, and TCP headers.
+4. Searches the first 128 bytes of TCP payload for the dummy token.
 5. Replaces the matching bytes with the real token.
-6. Recomputes checksums.
+6. Stores the replacement with checksum recomputation enabled.
 7. Allows the modified packet through.
+
+The diagnostics maps expose counters such as `packets`, `map_hits`,
+`tcp_payloads`, `token_found`, and `rewrite_ok`. Seeing `token_found=1` and
+`rewrite_ok=1` confirms that the kernel program rewrote at least one packet.
 
 ## Proxy Data Path
 
@@ -125,4 +131,3 @@ For each accepted TCP connection, `agent-vault/src/proxy.rs`:
 
 This implementation is intentionally small. It is useful for demos and local
 HTTP tests, but it is not a complete production proxy.
-

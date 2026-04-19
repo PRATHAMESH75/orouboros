@@ -4,7 +4,7 @@ An AI coding agent sends HTTP requests using a **dummy token** (`FAKE_TOKEN_1234
 
 For a structured developer guide, start with [`docs/README.md`](docs/README.md).
 
-**On Linux:** An eBPF `cgroup_skb/egress` hook intercepts every outbound TCP packet from that agent's cgroup, locates the dummy token in the payload, and overwrites it with the **real credential** before the packet leaves the host.
+**On Linux:** An eBPF TC egress classifier intercepts outbound TCP packets, checks whether they belong to the agent's test cgroup, locates the dummy token in the payload, and overwrites it with the **real credential** before the packet leaves the host.
 
 **On macOS/Windows:** A local HTTP proxy (`localhost:8888`) intercepts requests, rewrites the token in HTTP headers and request bodies, and forwards to the upstream server.
 
@@ -30,7 +30,9 @@ Both modes ensure the agent process — and any logs it emits — **only ever se
 |---|---|---|
 | Linux kernel | **5.8+** | `uname -r` |
 | cgroup v2 (unified hierarchy) | required | `stat -f --format="%T" /sys/fs/cgroup` → must print `cgroup2fs` |
+| TC / clsact support | required | provided by modern Linux kernels |
 | Docker | 20.10+ | `docker version` |
+| Docker daemon access | required | use `sudo docker ...` or add your user to the `docker` group |
 | Rust stable | 1.78+ | `rustup show` |
 | Rust nightly | any | `rustup toolchain install nightly` |
 
@@ -58,7 +60,7 @@ orouboros/
 │   └── src/lib.rs                  # TokenPair struct (C ABI)
 ├── agent-vault-ebpf/               # Kernel-space eBPF interceptor (Linux only)
 │   ├── Cargo.toml
-│   └── src/main.rs                 # cgroup_skb/egress hook (nightly, BPF target)
+│   └── src/main.rs                 # TC egress classifier (nightly, BPF target)
 └── agent-vault/                    # User-space daemon (dispatcher + proxy/eBPF modes)
     ├── Cargo.toml
     └── src/
@@ -119,15 +121,24 @@ export NO_PROXY=localhost,127.0.0.1
 stat -f --format="%T" /sys/fs/cgroup
 # Expected: cgroup2fs
 
-# 2. Build the container image (compiles both eBPF and daemon inside the image)
-docker compose build
+# 2. Build the container image (compiles both eBPF and daemon inside the image).
+# Use sudo unless your user can access /var/run/docker.sock.
+sudo docker compose build --no-cache --pull
 
 # 3. Start the daemon (auto-detects eBPF mode)
-docker compose up
+sudo docker compose up
+
+# Optional: override interface auto-detection if needed
+sudo env AGENT_VAULT_IFACE=eth0 docker compose up
 
 # 4. In another terminal, test from within the test cgroup:
-echo $$ | sudo tee /sys/fs/cgroup/agent-vault-test/cgroup.procs
-curl -v -H "Authorization: Bearer FAKE_TOKEN_12345" http://httpbin.org/headers
+echo $$ | sudo tee /sys/fs/cgroup/agent-vault-test/cgroup.procs >/dev/null
+cat /proc/$$/cgroup
+
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+  curl -4 -sS --http1.1 --noproxy '*' \
+  -H "Authorization: Bearer FAKE_TOKEN_12345" \
+  http://httpbin.org/headers
 ```
 
 ### **Linux: Manual build without Docker**
@@ -144,6 +155,7 @@ cargo +nightly build \
 cargo build --package agent-vault --release
 
 # Step 3: run with explicit eBPF mode
+# Optional: set AGENT_VAULT_IFACE=eth0 if default route detection picks the wrong interface.
 sudo ./target/release/agent-vault --mode ebpf
 ```
 
@@ -194,10 +206,20 @@ In a **second terminal**, after the daemon is running:
 
 ```bash
 # Move your shell into the test cgroup
-echo $$ | sudo tee /sys/fs/cgroup/agent-vault-test/cgroup.procs
+echo $$ | sudo tee /sys/fs/cgroup/agent-vault-test/cgroup.procs >/dev/null
+cat /proc/$$/cgroup
 
-# Make a request with the dummy token
-curl -v -H "Authorization: Bearer FAKE_TOKEN_12345" http://httpbin.org/headers
+# Make a plain HTTP/1.1 request with the dummy token.
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+  curl -4 -sS --http1.1 --noproxy '*' \
+  -H "Authorization: Bearer FAKE_TOKEN_12345" \
+  http://httpbin.org/headers
+```
+
+The cgroup check should print:
+
+```text
+0::/agent-vault-test
 ```
 
 **Expected response** (httpbin echoes back what it received):
@@ -211,6 +233,14 @@ curl -v -H "Authorization: Bearer FAKE_TOKEN_12345" http://httpbin.org/headers
 ```
 
 The agent sent `FAKE_TOKEN_12345`; the server saw `REAL_SECRET_9999`.
+The daemon logs should also eventually include counters like:
+
+```text
+eBPF stats: packets=..., map_hits=..., tcp_payloads=1, token_found=1, rewrite_ok=1; ...
+```
+
+`token_found=1` and `rewrite_ok=1` confirm that the kernel program found the
+dummy token and rewrote the packet payload.
 
 ---
 
@@ -220,20 +250,20 @@ The agent sent `FAKE_TOKEN_12345`; the server saw `REAL_SECRET_9999`.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Docker Container (privileged, pid: host)               │
+│  Docker Container (privileged, pid: host, net: host)    │
 │                                                         │
 │  ┌──────────────────────┐   eBPF HashMap (cgroup_id →  │
 │  │  agent-vault daemon  │──── TokenPair)                │
 │  │  (Tokio, user-space) │                   │           │
 │  │  • loads eBPF prog   │                   ▼           │
 │  │  • creates cgroup    │  ┌────────────────────────┐   │
-│  │  • populates map     │  │ Kernel: cgroup_skb/    │   │
-│  └──────────────────────┘  │ egress hook            │   │
-│                             │ 1. get cgroup ID       │   │
+│  │  • populates map     │  │ Kernel: TC egress      │   │
+│  │  • attaches to iface │  │ classifier             │   │
+│  └──────────────────────┘  │ 1. get skb cgroup ID   │   │
 │                             │ 2. map lookup          │   │
 │                             │ 3. find dummy token    │   │
 │                             │ 4. overwrite w/ real   │   │
-│                             │ 5. fix L3/L4 checksums │   │
+│                             │ 5. recompute checksum   │   │
 │                             └────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -275,22 +305,30 @@ Intercepted POST request to api.example.com (token rewritten: FAKE_TOKEN_12345 �
 
 ### **eBPF mode logs**
 
-Kernel log lines are forwarded to the host logger via `aya-log`. Set `RUST_LOG=info` to see them:
+The daemon logs runtime counters from eBPF maps every few seconds when traffic
+changes:
 
+```text
+eBPF stats: packets=223, cgroup_zero=12, map_hits=7, tcp_payloads=1, token_found=1, rewrite_ok=1; last_cgroup_id=12202, last_packet_len=749, last_payload_offset=66, last_scan_len=122
 ```
-[agent-vault-ebpf] INFO: Map hit for cgroup_id=12345
-[agent-vault-ebpf] INFO: Dummy token at offset 234; rewriting
-[agent-vault-ebpf] INFO: Payload rewritten & checksums updated
-```
+
+Useful readings:
+
+- `packets=0`: the TC program is not seeing traffic on the attached interface.
+- `packets>0, map_hits=0`: traffic is visible, but no packet matched the test cgroup.
+- `tcp_payloads>0, token_found=0`: HTTP payload was parsed, but the dummy token was not inside the scan window.
+- `token_found=1, rewrite_ok=1`: the dummy token was found and rewritten successfully.
 
 ### Common failure modes
 
 | Symptom | Cause (eBPF) | Fix |
 |---|---|---|
 | `Permission denied` on BPF load | Missing `CAP_BPF`/`CAP_NET_ADMIN` | Ensure container uses `privileged: true` |
+| `permission denied` on Docker socket | User cannot access Docker daemon | Use `sudo docker compose ...` or add the user to the `docker` group |
+| `bpf-linker` fails with `edition2024` | Builder image uses old Cargo | Rebuild with the current `rust:1-slim-bookworm` Dockerfile |
 | cgroup ID is always 0 | PID namespace isolation | Use `pid: host` in docker-compose |
-| Token not replaced | Process not in the test cgroup | Run `echo $$ \| sudo tee …/cgroup.procs` first |
-| TCP checksum rejected by server | Missing `BPF_F_PSEUDO_HDR` | Already fixed in v2 — verify latest code |
+| Token not replaced | Process not in the test cgroup, wrong egress interface, or daemon not in host network namespace | Run `echo $$ \| sudo tee …/cgroup.procs` first; set `AGENT_VAULT_IFACE=eth0` if needed; Docker mode must use `network_mode: host` |
+| TCP checksum rejected by server | Checksum was not recomputed after payload rewrite | Verify `BPF_F_RECOMPUTE_CSUM` is used |
 | eBPF program rejected by verifier | Unbounded loop / missing bounds check | Check `ctx.len()` guard in `try_intercept` |
 | `cgroup2fs` not found | Host uses cgroup v1 | Reboot with `systemd.unified_cgroup_hierarchy=1` |
 
@@ -302,13 +340,13 @@ Kernel log lines are forwarded to the host logger via `aya-log`. Set `RUST_LOG=i
 |---|---|---|
 | **Platform support** | Linux 5.8+ only | Any OS |
 | **Zero-knowledge** | ✅ Yes (kernel-space) | ❌ No (agent sees proxy) |
-| **Protocol support** | All (TCP/UDP) | HTTP/1.1 only |
+| **Protocol support** | Plain IPv4/TCP payloads | HTTP/1.1 only |
 | **Performance** | ⚡ Very fast | Good (one hop) |
 | **Setup complexity** | Medium (Docker, cgroup v2) | Simple (run locally) |
-| **HTTPS/TLS** | Payload inspection blocked | Requires custom CA |
+| **HTTPS/TLS** | Payload inspection blocked | Not implemented; plain HTTP only |
 | **Configuration** | Cgroup membership | `HTTP_PROXY` env var |
 
-> Choose **eBPF mode** for servers (true zero-knowledge, all protocols).  
+> Choose **eBPF mode** for Linux hosts where plain TCP payload rewriting is acceptable.
 > Choose **proxy mode** for development on macOS/Windows (easier setup, HTTP/1.1 only).
 
 ---

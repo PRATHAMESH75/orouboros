@@ -16,22 +16,21 @@ The eBPF program rewrites bytes in packet payloads. It cannot inspect encrypted
 TLS payloads at this layer. HTTPS requests will not expose the `Authorization`
 header as plain text to this hook.
 
-### Fixed Header Assumptions
+### Packet Format Assumptions
 
 The eBPF program assumes:
 
 - Ethernet II header is 14 bytes.
-- IPv4 header is 20 bytes.
-- TCP header is 20 bytes.
-- No IPv4 options.
-- No TCP options.
+- IPv4 traffic.
+- TCP payloads.
 
-Packets that do not match those assumptions may not be rewritten correctly.
+IPv6, UDP, and non-Ethernet link-layer layouts are passed through unchanged.
 
 ### Limited Payload Scan
 
-Only 128 bytes are loaded into the eBPF stack buffer. If the dummy token appears
-later than that window, it will not be found.
+Only the first 128 bytes of TCP payload are scanned. Shorter payloads are still
+inspected, but if the dummy token appears later than that window, it will not be
+found.
 
 ### Equal-Length Tokens
 
@@ -96,10 +95,11 @@ first or use:
 cargo xtask build-all --release
 ```
 
-### `cargo` Is Required
+### Modern Cargo Is Required
 
-The current environment used to write these docs did not have `cargo` on
-`PATH`, so builds/tests could not be executed here.
+The Docker builder uses the current stable Rust image because recent
+`bpf-linker` releases use Rust 2024 edition metadata. Older Cargo versions such
+as Cargo 1.78 can fail before compilation with an `edition2024` manifest error.
 
 ## Security Risks
 
@@ -118,4 +118,3 @@ the rewrite happens below the agent process.
 
 The code and docs print the demo replacement pair. Production code should avoid
 logging real credentials.
-

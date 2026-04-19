@@ -44,7 +44,7 @@ This value is not currently exposed as a CLI flag.
 
 ## Cgroup Path
 
-eBPF mode creates and attaches to:
+eBPF mode creates the test cgroup at:
 
 ```text
 /sys/fs/cgroup/agent-vault-test
@@ -58,6 +58,23 @@ const CGROUP_PATH: &str = "/sys/fs/cgroup/agent-vault-test";
 
 Traffic is rewritten only for processes that belong to this cgroup and match a
 `TOKEN_MAP` entry.
+
+## egress Interfaces
+
+By default, eBPF mode attaches the TC classifier to active non-loopback host
+interfaces. Override the interface list with a comma-separated environment
+variable:
+
+```bash
+AGENT_VAULT_IFACE=wlp8s0 ./target/release/agent-vault --mode ebpf
+AGENT_VAULT_IFACE=wlp8s0,enp7s0 ./target/release/agent-vault --mode ebpf
+```
+
+With Docker Compose:
+
+```bash
+sudo env AGENT_VAULT_IFACE=wlp8s0 docker compose up
+```
 
 ## BPF Map
 
@@ -90,13 +107,13 @@ The current daemon inserts one entry at startup.
 
 ## eBPF Packet Constants
 
-The eBPF program uses fixed header sizes:
+The eBPF program uses a fixed Ethernet header size and parses the IPv4 and TCP
+header lengths from packet fields:
 
 ```rust
 const ETH_HDR_LEN: u32 = 14;
-const IPV4_HDR_LEN: u32 = 20;
-const TCP_HDR_LEN: u32 = 20;
-const PAYLOAD_OFFSET: u32 = ETH_HDR_LEN + IPV4_HDR_LEN + TCP_HDR_LEN;
+const IPV4_MIN_HDR_LEN: u32 = 20;
+const TCP_MIN_HDR_LEN: u32 = 20;
 ```
 
 It scans:
@@ -106,8 +123,21 @@ const TOKEN_LEN: usize = 16;
 const PAYLOAD_BUF: usize = 128;
 ```
 
-This means the token must appear within the first 128 bytes loaded from the
-assumed payload offset.
+This means the token must appear within the first 128 bytes of TCP payload.
+
+## Diagnostic Maps
+
+eBPF mode exposes two array maps for daemon-side diagnostics:
+
+```text
+STATS
+DEBUG_VALUES
+```
+
+The daemon logs counters such as `packets`, `map_hits`, `tcp_payloads`,
+`token_found`, and `rewrite_ok` every few seconds when traffic changes.
+`token_found=1` and `rewrite_ok=1` indicate that at least one packet was
+rewritten successfully.
 
 ## Logging
 
@@ -119,6 +149,5 @@ RUST_LOG=info ./target/release/agent-vault --mode proxy
 RUST_LOG=debug ./target/release/agent-vault --mode proxy
 ```
 
-In eBPF mode, `aya_log::EbpfLogger::init` forwards `aya_log_ebpf::info!`
-messages from the kernel program into the daemon logger.
-
+In eBPF mode, the kernel program does not emit log lines directly. Instead, the
+daemon reads eBPF diagnostic maps and logs summary counters with `RUST_LOG=info`.

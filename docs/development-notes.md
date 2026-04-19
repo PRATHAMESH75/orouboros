@@ -49,7 +49,8 @@ workspace-level split between:
 
 The highest-risk implementation area is `agent-vault/src/proxy.rs`, because it
 manually parses and reconstructs HTTP traffic. The eBPF path is also narrow by
-design: fixed offsets, fixed token sizes, and a short payload scan window.
+design: fixed token sizes, IPv4/TCP-only parsing, and a short payload scan
+window.
 
 ## Common Debug Checklist
 
@@ -80,7 +81,26 @@ ls -lh target/release/agent-vault
 Check that the test process is in the cgroup:
 
 ```bash
-cat /sys/fs/cgroup/agent-vault-test/cgroup.procs
+cat /proc/$$/cgroup
+```
+
+Expected:
+
+```text
+0::/agent-vault-test
+```
+
+Check daemon-side eBPF counters after sending a test request:
+
+```bash
+sudo docker compose logs --no-color agent-vault | tail -120
+```
+
+Useful success indicators:
+
+```text
+token_found=1
+rewrite_ok=1
 ```
 
 For proxy mode:
@@ -97,4 +117,3 @@ curl -v \
   -H "Authorization: Bearer FAKE_TOKEN_12345" \
   http://httpbin.org/headers
 ```
-

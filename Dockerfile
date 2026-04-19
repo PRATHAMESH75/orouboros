@@ -1,4 +1,4 @@
-FROM rust:1.78-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
 
 # System dependencies for eBPF cross-compilation and aya
 RUN apt-get update && apt-get install -y \

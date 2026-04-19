@@ -1,8 +1,9 @@
-//! eBPF cgroup_skb/egress interceptor.
+//! eBPF TC egress interceptor.
 //!
-//! Loaded by the user-space daemon; attaches to a cgroup and rewrites any TCP
-//! payload that contains the registered dummy token, replacing it with the real
-//! credential *in-flight*.  The originating process never sees the real token.
+//! Loaded by the user-space daemon; attaches to the host egress interface and
+//! rewrites TCP payloads from registered cgroups that contain the dummy token,
+//! replacing it with the real credential in-flight. The originating process
+//! never sees the real token.
 //!
 //! # Build
 //! ```
@@ -15,14 +16,14 @@
 #![no_std]
 #![no_main]
 
+use agent_vault_common::TokenPair;
+use aya_ebpf::bindings::TC_ACT_OK;
 use aya_ebpf::{
-    macros::{cgroup_skb, map},
-    maps::HashMap,
-    programs::SkBuffContext,
+    macros::{classifier, map},
+    maps::{Array, HashMap},
+    programs::TcContext,
     EbpfContext,
 };
-use aya_log_ebpf::info;
-use agent_vault_common::TokenPair;
 
 // ---------------------------------------------------------------------------
 // eBPF map: cgroup_id (u64) → TokenPair
@@ -30,52 +31,77 @@ use agent_vault_common::TokenPair;
 #[map(name = "TOKEN_MAP")]
 static TOKEN_MAP: HashMap<u64, TokenPair> = HashMap::with_max_entries(64, 0);
 
+#[map(name = "STATS")]
+static STATS: Array<u64> = Array::with_max_entries(8, 0);
+
+#[map(name = "DEBUG_VALUES")]
+static DEBUG_VALUES: Array<u64> = Array::with_max_entries(8, 0);
+
 // ---------------------------------------------------------------------------
-// Packet offsets (Ethernet II + IPv4 (no options) + TCP (no options))
+// Packet offsets for TC egress.
+//
+// TC classifiers see packets from the Ethernet header (L2), so byte 0 is the
+// first byte of the destination MAC address.
 // ---------------------------------------------------------------------------
 const ETH_HDR_LEN: u32 = 14;
-const IPV4_HDR_LEN: u32 = 20; // MVP assumes no IP options
-const TCP_HDR_LEN: u32 = 20;  // MVP assumes no TCP options
-const PAYLOAD_OFFSET: u32 = ETH_HDR_LEN + IPV4_HDR_LEN + TCP_HDR_LEN; // 54
-
-// Checksum field offsets from start of the raw frame
-const IP_CSUM_OFFSET: u32 = ETH_HDR_LEN + 10;              // byte 24
-const TCP_CSUM_OFFSET: u32 = ETH_HDR_LEN + IPV4_HDR_LEN + 16; // byte 50
+const ETH_TYPE_OFFSET: u32 = 12;
+const ETH_P_IPV4: u16 = 0x0800;
+const IPV4_MIN_HDR_LEN: u32 = 20;
+const TCP_MIN_HDR_LEN: u32 = 20;
+const IPV4_PROTOCOL_OFFSET: u32 = 9;
+const TCP_DATA_OFFSET_BYTE: u32 = 12;
+const IPPROTO_TCP: u8 = 6;
 
 const TOKEN_LEN: usize = 16;
 const PAYLOAD_BUF: usize = 128;
 
-// BPF_F_PSEUDO_HDR (0x10): instructs bpf_l4_csum_replace to include the IP
-// pseudo-header in the TCP checksum.  Omitting this flag produces invalid TCP
-// checksums that the remote peer will silently reject.
-const BPF_F_PSEUDO_HDR: u64 = 0x10;
+// Ask bpf_skb_store_bytes to update the skb checksum after the payload rewrite.
+const BPF_F_RECOMPUTE_CSUM: u64 = 1;
+
+const STAT_PACKETS: u32 = 0;
+const STAT_CGROUP_ZERO: u32 = 1;
+const STAT_MAP_HITS: u32 = 2;
+const STAT_TCP_PAYLOADS: u32 = 3;
+const STAT_TOKEN_FOUND: u32 = 4;
+const STAT_REWRITE_OK: u32 = 5;
+
+const DEBUG_LAST_CGROUP_ID: u32 = 0;
+const DEBUG_LAST_PACKET_LEN: u32 = 1;
+const DEBUG_LAST_PAYLOAD_OFFSET: u32 = 2;
+const DEBUG_LAST_SCAN_LEN: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-#[cgroup_skb]
-pub fn cgroup_skb_egress(ctx: SkBuffContext) -> i32 {
+#[classifier]
+pub fn token_rewrite_egress(ctx: TcContext) -> i32 {
     match try_intercept(&ctx) {
         Ok(ret) => ret,
-        Err(_)  => 1, // on any error, let the original packet through
+        Err(_) => TC_ACT_OK, // on any error, let the original packet through
     }
 }
 
 // ---------------------------------------------------------------------------
 // Core logic
 // ---------------------------------------------------------------------------
-fn try_intercept(ctx: &SkBuffContext) -> Result<i32, i64> {
-    // Step 1 — identify the cgroup that owns this socket.
-    // FIXED from v1: bpf_get_current_cgroup_id(), NOT ctx.cb() which is unrelated.
-    let cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
+fn try_intercept(ctx: &TcContext) -> Result<i32, i64> {
+    // Step 1 — identify the cgroup that owns this skb.
+    bump_stat(STAT_PACKETS);
+    set_debug(DEBUG_LAST_PACKET_LEN, ctx.len() as u64);
+
+    let cgroup_id =
+        unsafe { aya_ebpf::helpers::bpf_skb_cgroup_id(ctx.as_ptr() as *mut _) };
+    set_debug(DEBUG_LAST_CGROUP_ID, cgroup_id);
+    if cgroup_id == 0 {
+        bump_stat(STAT_CGROUP_ZERO);
+    }
 
     // Step 2 — is this cgroup registered in our map?
     let pair_ptr = match unsafe { TOKEN_MAP.get(&cgroup_id) } {
         Some(ptr) => ptr,
-        None      => return Ok(1), // not our cgroup; pass through
+        None => return Ok(TC_ACT_OK), // not our cgroup; pass through
     };
-
-    info!(ctx, "Map hit for cgroup_id={}", cgroup_id);
+    bump_stat(STAT_MAP_HITS);
 
     // Copy the TokenPair off the map pointer onto the BPF stack.
     // This is safe: TokenPair is repr(C) + Copy and the pointer is valid for the
@@ -83,48 +109,95 @@ fn try_intercept(ctx: &SkBuffContext) -> Result<i32, i64> {
     // Copying to the stack also makes subsequent field accesses verifier-friendly.
     let pair: TokenPair = unsafe { *pair_ptr };
 
-    // Step 3 — bounds check: packet must be large enough to contain PAYLOAD_OFFSET + TOKEN_LEN.
-    // The verifier requires an explicit guard before any bpf_skb_load_bytes call.
-    if ctx.len() < PAYLOAD_OFFSET + TOKEN_LEN as u32 {
-        return Ok(1); // packet too small; pass through
+    // Step 3 — parse IPv4/TCP header lengths and compute the payload offset.
+    let packet_len = ctx.len();
+    if packet_len < ETH_HDR_LEN + IPV4_MIN_HDR_LEN + TCP_MIN_HDR_LEN + TOKEN_LEN as u32 {
+        return Ok(TC_ACT_OK);
     }
 
-    // Step 4 — load up to PAYLOAD_BUF bytes of TCP payload into a stack buffer.
-    // Stack is limited to 512 bytes; 128-byte buffer is safe.
-    let mut payload = [0u8; PAYLOAD_BUF];
+    if load_be_u16(ctx, ETH_TYPE_OFFSET)? != ETH_P_IPV4 {
+        return Ok(TC_ACT_OK);
+    }
 
-    let ret = unsafe {
-        aya_ebpf::helpers::bpf_skb_load_bytes(
-            ctx.as_ptr() as *const _,
-            PAYLOAD_OFFSET,
-            payload.as_mut_ptr() as *mut _,
-            PAYLOAD_BUF as u32,
-        )
+    let ip_offset = ETH_HDR_LEN;
+    let version_ihl = load_byte(ctx, ip_offset)?;
+    if version_ihl >> 4 != 4 {
+        return Ok(TC_ACT_OK);
+    }
+
+    let ip_header_len = ((version_ihl & 0x0f) as u32) * 4;
+    if ip_header_len < IPV4_MIN_HDR_LEN {
+        return Ok(TC_ACT_OK);
+    }
+
+    if load_byte(ctx, ip_offset + IPV4_PROTOCOL_OFFSET)? != IPPROTO_TCP {
+        return Ok(TC_ACT_OK);
+    }
+
+    if packet_len < ip_offset + ip_header_len + TCP_MIN_HDR_LEN + TOKEN_LEN as u32 {
+        return Ok(TC_ACT_OK);
+    }
+
+    let tcp_offset = ip_offset + ip_header_len;
+    let tcp_header_len = ((load_byte(ctx, tcp_offset + TCP_DATA_OFFSET_BYTE)? >> 4) as u32) * 4;
+    if tcp_header_len < TCP_MIN_HDR_LEN {
+        return Ok(TC_ACT_OK);
+    }
+
+    let payload_offset = tcp_offset + tcp_header_len;
+    if packet_len < payload_offset + TOKEN_LEN as u32 {
+        return Ok(TC_ACT_OK);
+    }
+    set_debug(DEBUG_LAST_PAYLOAD_OFFSET, payload_offset as u64);
+
+    let payload_len = packet_len - payload_offset;
+    let scan_len = if payload_len > PAYLOAD_BUF as u32 {
+        PAYLOAD_BUF as u32
+    } else {
+        payload_len
     };
-    if ret < 0 {
-        return Ok(1); // load failed; pass through
-    }
+    set_debug(DEBUG_LAST_SCAN_LEN, scan_len as u64);
+    bump_stat(STAT_TCP_PAYLOADS);
 
     // Step 5 — scan payload for exactly TOKEN_LEN bytes matching dummy_token.
-    // Nested bounded loops; both bounds are compile-time constants, verifier-safe.
+    // The scan window is capped, but the packet may contain less than PAYLOAD_BUF
+    // bytes. Load one fixed-size token candidate at a time so short HTTP
+    // requests are still inspected without reading past the end of the skb.
     let mut found_offset: Option<u32> = None;
 
-    'outer: for i in 0..(PAYLOAD_BUF - TOKEN_LEN) {
+    'outer: for i in 0..(PAYLOAD_BUF - TOKEN_LEN + 1) {
+        if i as u32 + TOKEN_LEN as u32 > scan_len {
+            break;
+        }
+
+        let mut candidate = [0u8; TOKEN_LEN];
+        let candidate_offset = payload_offset + i as u32;
+        let ret = unsafe {
+            aya_ebpf::helpers::bpf_skb_load_bytes(
+                ctx.as_ptr() as *const _,
+                candidate_offset,
+                candidate.as_mut_ptr() as *mut _,
+                TOKEN_LEN as u32,
+            )
+        };
+        if ret < 0 {
+            return Ok(TC_ACT_OK);
+        }
+
         for j in 0..TOKEN_LEN {
-            if payload[i + j] != pair.dummy_token[j] {
+            if candidate[j] != pair.dummy_token[j] {
                 continue 'outer;
             }
         }
-        found_offset = Some(PAYLOAD_OFFSET + i as u32);
+        found_offset = Some(candidate_offset);
+        bump_stat(STAT_TOKEN_FOUND);
         break;
     }
 
     let write_offset = match found_offset {
         Some(o) => o,
-        None    => return Ok(1), // dummy token not in this packet; pass through
+        None => return Ok(TC_ACT_OK), // dummy token not in this packet; pass through
     };
-
-    info!(ctx, "Dummy token at offset {}; rewriting", write_offset);
 
     // Step 6 — overwrite dummy_token bytes with real_token in the packet.
     let ret = unsafe {
@@ -133,42 +206,57 @@ fn try_intercept(ctx: &SkBuffContext) -> Result<i32, i64> {
             write_offset,
             pair.real_token.as_ptr() as *const _,
             TOKEN_LEN as u32,
-            0,
+            BPF_F_RECOMPUTE_CSUM,
         )
     };
     if ret < 0 {
         return Err(ret);
     }
+    bump_stat(STAT_REWRITE_OK);
 
-    // Step 7a — recompute IPv4 header checksum (L3).
-    // For a payload-only rewrite the IP header itself is unchanged, so L3 recalc
-    // is technically a no-op here.  Included for correctness and future-proofing.
-    unsafe {
-        aya_ebpf::helpers::bpf_l3_csum_replace(
-            ctx.as_ptr() as *mut _,
-            IP_CSUM_OFFSET,
-            0, // old = 0 → full recompute
-            0, // new = 0 → full recompute
-            0,
-        );
+    Ok(TC_ACT_OK) // allow the *modified* packet
+}
+
+#[inline(always)]
+fn bump_stat(index: u32) {
+    if let Some(value) = STATS.get_ptr_mut(index) {
+        unsafe {
+            *value += 1;
+        }
     }
+}
 
-    // Step 7b — recompute TCP checksum (L4).
-    // FIXED from v1: BPF_F_PSEUDO_HDR is mandatory for TCP.  Without it the kernel
-    // omits the IP pseudo-header, producing a checksum the remote will reject.
-    unsafe {
-        aya_ebpf::helpers::bpf_l4_csum_replace(
-            ctx.as_ptr() as *mut _,
-            TCP_CSUM_OFFSET,
-            0,                // old = 0 → full recompute
-            0,                // new = 0 → full recompute
-            BPF_F_PSEUDO_HDR, // CRITICAL: include IP pseudo-header
-        );
+#[inline(always)]
+fn set_debug(index: u32, value: u64) {
+    if let Some(slot) = DEBUG_VALUES.get_ptr_mut(index) {
+        unsafe {
+            *slot = value;
+        }
     }
+}
 
-    info!(ctx, "Payload rewritten & checksums updated");
+#[inline(always)]
+fn load_byte(ctx: &TcContext, offset: u32) -> Result<u8, i64> {
+    let mut byte = [0u8; 1];
+    let ret = unsafe {
+        aya_ebpf::helpers::bpf_skb_load_bytes(
+            ctx.as_ptr() as *const _,
+            offset,
+            byte.as_mut_ptr() as *mut _,
+            1,
+        )
+    };
+    if ret < 0 {
+        return Err(ret);
+    }
+    Ok(byte[0])
+}
 
-    Ok(1) // allow the *modified* packet
+#[inline(always)]
+fn load_be_u16(ctx: &TcContext, offset: u32) -> Result<u16, i64> {
+    let high = load_byte(ctx, offset)? as u16;
+    let low = load_byte(ctx, offset + 1)? as u16;
+    Ok((high << 8) | low)
 }
 
 // Required for no_std + BPF target — the verifier never actually executes this.
